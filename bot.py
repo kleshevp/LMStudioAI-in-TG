@@ -9,7 +9,7 @@ import config
 client = OpenAI(base_url=config.OPENAI_BASE_URL, api_key=config.OPENAI_API_KEY)
 
 # Initialize Telegram bot
-bot = Bot(token=config.BOT_TOKEN, parse_mode="HTML")
+bot = Bot(token=config.BOT_TOKEN)
 dp = Dispatcher()
 
 # Dictionary for storing user chat histories
@@ -56,7 +56,7 @@ async def chat_handler(message: Message):
 
     try:
         if config.STREAM_MODE:
-            # Streamed response
+            # Run blocking stream in a separate thread
             stream = client.chat.completions.create(
                 model=config.OPENAI_MODEL,
                 messages=messages[user_id],
@@ -66,10 +66,15 @@ async def chat_handler(message: Message):
 
             response_text = ""
             buffer = ""
-            update_interval = 5  # Update every 5 chunks
+            update_interval = 5  # update every 5 chunks
             counter = 0
+            last_sent = ""
 
-            async for chunk in stream:
+            def process_stream():
+                for chunk in stream:
+                    yield chunk
+
+            for chunk in await asyncio.to_thread(lambda: list(process_stream())):
                 delta = chunk.choices[0].delta
                 if not delta or not delta.content:
                     continue
@@ -81,23 +86,25 @@ async def chat_handler(message: Message):
 
                 # Update Telegram message not too often
                 if counter % update_interval == 0 and buffer.strip():
-                    try:
-                        await bot.edit_message_text(
-                            chat_id=message.chat.id,
-                            message_id=smart.message_id,
-                            text=response_text,
-                        )
-                        buffer = ""
-                    except Exception:
-                        pass
+                    if response_text.strip() != last_sent.strip():
+                        try:
+                            await bot.edit_message_text(
+                                chat_id=message.chat.id,
+                                message_id=smart.message_id,
+                                text=response_text,
+                            )
+                            last_sent = response_text
+                            buffer = ""
+                        except Exception:
+                            pass
 
             # Final update
-            await bot.edit_message_text(
-                chat_id=message.chat.id,
-                message_id=smart.message_id,
-                text=response_text or "⚠️ Empty response",
-            )
-
+            if response_text.strip() != last_sent.strip():
+                await bot.edit_message_text(
+                    chat_id=message.chat.id,
+                    message_id=smart.message_id,
+                    text=response_text or "⚠️ Empty response",
+                )
         else:
             # Non-streamed response
             completion = client.chat.completions.create(
